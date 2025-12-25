@@ -1,0 +1,24 @@
+# Sentinel Agent Registry Manifest
+# Denylist Agent - IP and pattern-based blocking
+
+[agent]
+name = "sentinel-agent-denylist"
+version = "0.1.0"
+description = "IP and pattern-based blocking agent for Sentinel reverse proxy"
+authors = ["Sentinel Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raskell-io/sentinel-agent-denylist"
+
+[protocol]
+version = "0.1"
+events = ["request_headers"]
+
+[compatibility]
+sentinel-proxy = ">=0.1.0"
+sentinel-agent-protocol = "0.1"
+
+[registry]
+homepage = "https://sentinel.raskell.io/agents/denylist"
+documentation = "https://sentinel.raskell.io/docs/agents/denylist"
+keywords = ["sentinel", "agent", "denylist", "security", "blocking"]
+categories = ["security"]

@@ -5,12 +5,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use sentinel_agent_protocol::{
-    AgentHandler, AgentResponse, AgentServer, Decision, RequestHeadersEvent,
+    AgentHandler, AgentResponse, AgentServer, ConfigureEvent, Decision, RequestHeadersEvent,
 };
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::RwLock;
 use tracing::{debug, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -40,14 +42,34 @@ struct Args {
     verbose: bool,
 }
 
-/// Denylist agent handler
-struct DenylistHandler {
+/// JSON configuration for dynamic reconfiguration via on_configure()
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct DenylistConfigJson {
+    /// IP addresses to block
+    #[serde(default)]
+    pub block_ips: Vec<String>,
+    /// Path prefixes to block
+    #[serde(default)]
+    pub block_paths: Vec<String>,
+    /// User-Agent patterns to block
+    #[serde(default)]
+    pub block_user_agents: Vec<String>,
+}
+
+/// Internal state for denylist configuration
+struct DenylistState {
     /// Set of blocked IP addresses
     blocked_ips: HashSet<IpAddr>,
     /// Set of blocked path prefixes
     blocked_paths: Vec<String>,
     /// Set of blocked User-Agent patterns
     blocked_user_agents: Vec<String>,
+}
+
+/// Denylist agent handler
+struct DenylistHandler {
+    state: RwLock<DenylistState>,
 }
 
 impl DenylistHandler {
@@ -67,34 +89,70 @@ impl DenylistHandler {
             .collect();
 
         Self {
-            blocked_ips,
-            blocked_paths: args.block_paths.clone(),
-            blocked_user_agents: args.block_user_agents.clone(),
+            state: RwLock::new(DenylistState {
+                blocked_ips,
+                blocked_paths: args.block_paths.clone(),
+                blocked_user_agents: args.block_user_agents.clone(),
+            }),
+        }
+    }
+
+    /// Reconfigure the agent with new settings
+    fn reconfigure(&self, config: DenylistConfigJson) {
+        // Parse blocked IPs
+        let blocked_ips: HashSet<IpAddr> = config
+            .block_ips
+            .iter()
+            .filter_map(|ip| match IpAddr::from_str(ip) {
+                Ok(addr) => Some(addr),
+                Err(e) => {
+                    warn!("Invalid IP address '{}': {}", ip, e);
+                    None
+                }
+            })
+            .collect();
+
+        if let Ok(mut state) = self.state.write() {
+            if !config.block_ips.is_empty() {
+                state.blocked_ips = blocked_ips;
+            }
+            if !config.block_paths.is_empty() {
+                state.blocked_paths = config.block_paths;
+            }
+            if !config.block_user_agents.is_empty() {
+                state.blocked_user_agents = config.block_user_agents;
+            }
+            info!("Denylist agent reconfigured");
         }
     }
 
     /// Check if an IP is blocked
     fn is_ip_blocked(&self, ip: &str) -> bool {
         if let Ok(addr) = IpAddr::from_str(ip) {
-            self.blocked_ips.contains(&addr)
-        } else {
-            false
+            if let Ok(state) = self.state.read() {
+                return state.blocked_ips.contains(&addr);
+            }
         }
+        false
     }
 
     /// Check if a path is blocked
     fn is_path_blocked(&self, path: &str) -> bool {
-        self.blocked_paths
-            .iter()
-            .any(|blocked| path.starts_with(blocked))
+        if let Ok(state) = self.state.read() {
+            return state.blocked_paths.iter().any(|blocked| path.starts_with(blocked));
+        }
+        false
     }
 
     /// Check if a User-Agent is blocked
     fn is_user_agent_blocked(&self, user_agent: &str) -> bool {
         let ua_lower = user_agent.to_lowercase();
-        self.blocked_user_agents
-            .iter()
-            .any(|pattern| ua_lower.contains(&pattern.to_lowercase()))
+        if let Ok(state) = self.state.read() {
+            return state.blocked_user_agents
+                .iter()
+                .any(|pattern| ua_lower.contains(&pattern.to_lowercase()));
+        }
+        false
     }
 
     /// Create a deny response with a message
@@ -114,6 +172,20 @@ impl DenylistHandler {
 
 #[async_trait]
 impl AgentHandler for DenylistHandler {
+    async fn on_configure(&self, event: ConfigureEvent) -> AgentResponse {
+        let config: DenylistConfigJson = match serde_json::from_value(event.config) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!("Failed to parse denylist config: {}, using defaults", e);
+                return AgentResponse::default_allow();
+            }
+        };
+
+        self.reconfigure(config);
+        info!("Denylist agent configured via on_configure");
+        AgentResponse::default_allow()
+    }
+
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
         debug!(
             "Processing request: {} {} from {}",

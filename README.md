@@ -1,6 +1,6 @@
-# sentinel-agent-denylist
+# zentinel-agent-denylist
 
-IP and pattern-based blocking agent for [Sentinel](https://github.com/raskell-io/sentinel) reverse proxy.
+IP and pattern-based blocking agent for [Zentinel](https://github.com/zentinelproxy/zentinel) reverse proxy.
 
 ## Features
 
@@ -15,21 +15,21 @@ IP and pattern-based blocking agent for [Sentinel](https://github.com/raskell-io
 ### From crates.io
 
 ```bash
-cargo install sentinel-agent-denylist
+cargo install zentinel-agent-denylist
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/raskell-io/sentinel-agent-denylist
-cd sentinel-agent-denylist
+git clone https://github.com/zentinelproxy/zentinel-agent-denylist
+cd zentinel-agent-denylist
 cargo build --release
 ```
 
 ## Usage
 
 ```bash
-sentinel-denylist-agent --socket /var/run/sentinel/denylist.sock \
+zentinel-denylist-agent --socket /var/run/zentinel/denylist.sock \
   --block-ips "192.168.1.100,10.0.0.1" \
   --block-paths "/admin,/wp-admin" \
   --block-user-agents "bot,scanner"
@@ -39,7 +39,7 @@ sentinel-denylist-agent --socket /var/run/sentinel/denylist.sock \
 
 | Option | Environment Variable | Description | Default |
 |--------|---------------------|-------------|---------|
-| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/sentinel-denylist.sock` |
+| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-denylist.sock` |
 | `--block-ips` | - | Comma-separated IPs to block | - |
 | `--block-paths` | - | Comma-separated path prefixes to block | - |
 | `--block-user-agents` | - | Comma-separated User-Agent patterns to block | - |
@@ -47,16 +47,16 @@ sentinel-denylist-agent --socket /var/run/sentinel/denylist.sock \
 
 ## Configuration
 
-### Sentinel Proxy Configuration
+### Zentinel Proxy Configuration
 
-Add to your Sentinel `config.kdl`:
+Add to your Zentinel `config.kdl`:
 
 ```kdl
 agents {
     agent "denylist" {
         type "custom"
         transport "unix_socket" {
-            path "/var/run/sentinel/denylist.sock"
+            path "/var/run/zentinel/denylist.sock"
         }
         events ["request_headers"]
         timeout-ms 10
@@ -84,21 +84,21 @@ When a request is blocked, the agent returns:
 ### Block known bad IPs
 
 ```bash
-sentinel-denylist-agent \
+zentinel-denylist-agent \
   --block-ips "1.2.3.4,5.6.7.8,192.168.0.0/24"
 ```
 
 ### Block admin paths
 
 ```bash
-sentinel-denylist-agent \
+zentinel-denylist-agent \
   --block-paths "/admin,/wp-admin,/.env,/.git"
 ```
 
 ### Block malicious bots
 
 ```bash
-sentinel-denylist-agent \
+zentinel-denylist-agent \
   --block-user-agents "sqlmap,nikto,nessus,acunetix"
 ```
 

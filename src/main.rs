@@ -1,4 +1,4 @@
-//! Denylist agent for Sentinel proxy (v2 protocol)
+//! Denylist agent for Zentinel proxy (v2 protocol)
 //!
 //! This agent blocks requests based on configured deny rules for IPs, paths, and headers.
 
@@ -6,11 +6,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use sentinel_agent_protocol::v2::{
+use zentinel_agent_protocol::v2::{
     AgentCapabilities, AgentFeatures, AgentHandlerV2, DrainReason, GrpcAgentServerV2,
     HealthStatus, MetricsReport, ShutdownReason,
 };
-use sentinel_agent_protocol::{
+use zentinel_agent_protocol::{
     AgentResponse, AgentServer, Decision, EventType, RequestHeadersEvent,
 };
 use std::collections::HashSet;
@@ -27,7 +27,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 #[command(about = "Denylist agent for blocking requests based on IP, path, and header rules")]
 struct Args {
     /// Unix socket path to listen on
-    #[arg(short, long, default_value = "/tmp/sentinel-denylist.sock")]
+    #[arg(short, long, default_value = "/tmp/zentinel-denylist.sock")]
     socket: String,
 
     /// gRPC address to listen on (e.g., "0.0.0.0:50051")
@@ -276,12 +276,12 @@ impl AgentHandlerV2 for DenylistHandler {
     fn metrics_report(&self) -> Option<MetricsReport> {
         let mut report = MetricsReport::new("denylist-agent", 10_000);
 
-        report.counters.push(sentinel_agent_protocol::v2::CounterMetric::new(
+        report.counters.push(zentinel_agent_protocol::v2::CounterMetric::new(
             "denylist_requests_total",
             self.requests_processed.load(Ordering::Relaxed),
         ));
 
-        report.counters.push(sentinel_agent_protocol::v2::CounterMetric::new(
+        report.counters.push(zentinel_agent_protocol::v2::CounterMetric::new(
             "denylist_requests_blocked_total",
             self.requests_blocked.load(Ordering::Relaxed),
         ));
@@ -366,10 +366,10 @@ async fn main() -> Result<()> {
 struct V2HandlerWrapper(DenylistHandler);
 
 #[async_trait]
-impl sentinel_agent_protocol::AgentHandler for V2HandlerWrapper {
+impl zentinel_agent_protocol::AgentHandler for V2HandlerWrapper {
     async fn on_configure(
         &self,
-        event: sentinel_agent_protocol::ConfigureEvent,
+        event: zentinel_agent_protocol::ConfigureEvent,
     ) -> AgentResponse {
         let accepted = self.0.on_configure(event.config, None).await;
         if accepted {

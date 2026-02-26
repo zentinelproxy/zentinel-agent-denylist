@@ -6,11 +6,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use zentinel_agent_protocol::v2::{
-    AgentCapabilities, AgentFeatures, AgentHandlerV2, DrainReason, GrpcAgentServerV2,
-    HealthStatus, MetricsReport, ShutdownReason, UdsAgentServerV2,
-};
-use zentinel_agent_protocol::{AgentResponse, Decision, EventType, RequestHeadersEvent};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -18,6 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use tracing::{debug, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use zentinel_agent_protocol::v2::{
+    AgentCapabilities, AgentFeatures, AgentHandlerV2, DrainReason, GrpcAgentServerV2, HealthStatus,
+    MetricsReport, ShutdownReason, UdsAgentServerV2,
+};
+use zentinel_agent_protocol::{AgentResponse, Decision, EventType, RequestHeadersEvent};
 
 /// Denylist agent CLI arguments
 #[derive(Parser, Debug)]
@@ -199,17 +199,21 @@ impl DenylistHandler {
 impl AgentHandlerV2 for DenylistHandler {
     /// Returns agent capabilities for v2 protocol
     fn capabilities(&self) -> AgentCapabilities {
-        AgentCapabilities::new("denylist-agent", "Denylist Agent", env!("CARGO_PKG_VERSION"))
-            .with_event(EventType::RequestHeaders)
-            .with_event(EventType::Configure)
-            .with_features(AgentFeatures {
-                config_push: true,
-                health_reporting: true,
-                metrics_export: true,
-                concurrent_requests: 100,
-                cancellation: true,
-                ..Default::default()
-            })
+        AgentCapabilities::new(
+            "denylist-agent",
+            "Denylist Agent",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .with_event(EventType::RequestHeaders)
+        .with_event(EventType::Configure)
+        .with_features(AgentFeatures {
+            config_push: true,
+            health_reporting: true,
+            metrics_export: true,
+            concurrent_requests: 100,
+            cancellation: true,
+            ..Default::default()
+        })
     }
 
     /// Handle configuration update from proxy (v2 signature)
@@ -274,15 +278,19 @@ impl AgentHandlerV2 for DenylistHandler {
     fn metrics_report(&self) -> Option<MetricsReport> {
         let mut report = MetricsReport::new("denylist-agent", 10_000);
 
-        report.counters.push(zentinel_agent_protocol::v2::CounterMetric::new(
-            "denylist_requests_total",
-            self.requests_processed.load(Ordering::Relaxed),
-        ));
+        report
+            .counters
+            .push(zentinel_agent_protocol::v2::CounterMetric::new(
+                "denylist_requests_total",
+                self.requests_processed.load(Ordering::Relaxed),
+            ));
 
-        report.counters.push(zentinel_agent_protocol::v2::CounterMetric::new(
-            "denylist_requests_blocked_total",
-            self.requests_blocked.load(Ordering::Relaxed),
-        ));
+        report
+            .counters
+            .push(zentinel_agent_protocol::v2::CounterMetric::new(
+                "denylist_requests_blocked_total",
+                self.requests_blocked.load(Ordering::Relaxed),
+            ));
 
         Some(report)
     }
@@ -298,10 +306,7 @@ impl AgentHandlerV2 for DenylistHandler {
 
     /// Handle drain request from proxy
     async fn on_drain(&self, duration_ms: u64, reason: DrainReason) {
-        info!(
-            "Drain requested: {:?}, duration: {}ms",
-            reason, duration_ms
-        );
+        info!("Drain requested: {:?}, duration: {}ms", reason, duration_ms);
         // Agent should stop accepting new requests and finish in-flight ones
     }
 }
@@ -459,7 +464,9 @@ mod tests {
         handler.requests_processed.fetch_add(10, Ordering::Relaxed);
         handler.requests_blocked.fetch_add(2, Ordering::Relaxed);
 
-        let report = handler.metrics_report().expect("metrics report should exist");
+        let report = handler
+            .metrics_report()
+            .expect("metrics report should exist");
         assert_eq!(report.agent_id, "denylist-agent");
         assert_eq!(report.counters.len(), 2);
 

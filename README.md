@@ -12,13 +12,25 @@ IP and pattern-based blocking agent for [Zentinel](https://github.com/zentinelpr
 
 ## Installation
 
-### From crates.io
+### Using Bundle (Recommended)
+
+```bash
+# Install just this agent
+zentinel bundle install denylist
+
+# Or install all bundled agents
+zentinel bundle install
+```
+
+The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://zentinelproxy.io/docs/deployment/bundle/) for details.
+
+### Using Cargo
 
 ```bash
 cargo install zentinel-agent-denylist
 ```
 
-### From source
+### From Source
 
 ```bash
 git clone https://github.com/zentinelproxy/zentinel-agent-denylist
@@ -58,7 +70,7 @@ agents {
         transport "unix_socket" {
             path "/var/run/zentinel/denylist.sock"
         }
-        events ["request_headers"]
+        events "request_headers"
         timeout-ms 10
         failure-mode "open"
     }
@@ -68,7 +80,7 @@ routes {
     route "all" {
         matches { path-prefix "/" }
         upstream "backend"
-        agents ["denylist"]
+        agents "denylist"
     }
 }
 ```

@@ -8,11 +8,9 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use zentinel_agent_protocol::v2::{
     AgentCapabilities, AgentFeatures, AgentHandlerV2, DrainReason, GrpcAgentServerV2,
-    HealthStatus, MetricsReport, ShutdownReason,
+    HealthStatus, MetricsReport, ShutdownReason, UdsAgentServerV2,
 };
-use zentinel_agent_protocol::{
-    AgentResponse, AgentServer, Decision, EventType, RequestHeadersEvent,
-};
+use zentinel_agent_protocol::{AgentResponse, Decision, EventType, RequestHeadersEvent};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -349,43 +347,12 @@ async fn main() -> Result<()> {
         server.run(addr).await?;
     } else {
         info!("Socket path: {}", args.socket);
-        // For UDS, we use v1 AgentServer with v2-compatible handler wrapper
-        let server = AgentServer::new(
-            "denylist-agent",
-            &args.socket,
-            Box::new(V2HandlerWrapper(handler)),
-        );
+        let server = UdsAgentServerV2::new("denylist-agent", &args.socket, Box::new(handler));
         info!("Denylist agent ready (UDS)");
         server.run().await?;
     }
 
     Ok(())
-}
-
-/// Wrapper to use AgentHandlerV2 with v1 AgentServer (for UDS transport)
-struct V2HandlerWrapper(DenylistHandler);
-
-#[async_trait]
-impl zentinel_agent_protocol::AgentHandler for V2HandlerWrapper {
-    async fn on_configure(
-        &self,
-        event: zentinel_agent_protocol::ConfigureEvent,
-    ) -> AgentResponse {
-        let accepted = self.0.on_configure(event.config, None).await;
-        if accepted {
-            AgentResponse::default_allow()
-        } else {
-            let mut response = AgentResponse::default_allow();
-            response
-                .routing_metadata
-                .insert("config_error".to_string(), "true".to_string());
-            response
-        }
-    }
-
-    async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
-        self.0.on_request_headers(event).await
-    }
 }
 
 #[cfg(test)]

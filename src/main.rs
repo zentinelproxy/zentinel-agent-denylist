@@ -5,8 +5,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use clap::Parser;
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,9 +32,16 @@ struct Args {
     #[arg(long)]
     grpc_address: Option<String>,
 
-    /// Comma-separated list of IP addresses to block
+    /// Comma-separated list of IP addresses or CIDR ranges to block
     #[arg(long, value_delimiter = ',')]
     block_ips: Vec<String>,
+
+    /// Comma-separated list of IP addresses or CIDR ranges to allow.
+    /// Allow entries take precedence over --block-ips, so blocking
+    /// "0.0.0.0/0,::/0" while allowing specific ranges yields a
+    /// default-deny setup.
+    #[arg(long, value_delimiter = ',')]
+    allow_ips: Vec<String>,
 
     /// Comma-separated list of path prefixes to block
     #[arg(long, value_delimiter = ',')]
@@ -53,9 +60,12 @@ struct Args {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct DenylistConfigJson {
-    /// IP addresses to block
+    /// IP addresses or CIDR ranges to block
     #[serde(default)]
     pub block_ips: Vec<String>,
+    /// IP addresses or CIDR ranges to allow (take precedence over block-ips)
+    #[serde(default)]
+    pub allow_ips: Vec<String>,
     /// Path prefixes to block
     #[serde(default)]
     pub block_paths: Vec<String>,
@@ -66,12 +76,36 @@ pub struct DenylistConfigJson {
 
 /// Internal state for denylist configuration
 struct DenylistState {
-    /// Set of blocked IP addresses
-    blocked_ips: HashSet<IpAddr>,
+    /// Networks that are always allowed (checked before deny rules)
+    allowed_ips: Vec<IpNet>,
+    /// Networks to block
+    blocked_ips: Vec<IpNet>,
     /// Set of blocked path prefixes
     blocked_paths: Vec<String>,
     /// Set of blocked User-Agent patterns
     blocked_user_agents: Vec<String>,
+}
+
+/// Parse a list of IP address or CIDR strings into networks.
+///
+/// Plain addresses (e.g. `192.168.1.100`) are treated as host networks
+/// (`/32` for IPv4, `/128` for IPv6). Invalid entries are skipped with a
+/// warning.
+fn parse_ip_entries(entries: &[String]) -> Vec<IpNet> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if let Ok(net) = IpNet::from_str(entry) {
+                Some(net)
+            } else if let Ok(addr) = IpAddr::from_str(entry) {
+                Some(IpNet::from(addr))
+            } else {
+                warn!("Invalid IP address or CIDR '{}', skipping", entry);
+                None
+            }
+        })
+        .collect()
 }
 
 /// Denylist agent handler (v2 protocol)
@@ -88,22 +122,10 @@ struct DenylistHandler {
 impl DenylistHandler {
     /// Create a new denylist handler
     fn new(args: &Args) -> Self {
-        // Parse blocked IPs
-        let blocked_ips = args
-            .block_ips
-            .iter()
-            .filter_map(|ip| match IpAddr::from_str(ip) {
-                Ok(addr) => Some(addr),
-                Err(e) => {
-                    warn!("Invalid IP address '{}': {}", ip, e);
-                    None
-                }
-            })
-            .collect();
-
         Self {
             state: RwLock::new(DenylistState {
-                blocked_ips,
+                allowed_ips: parse_ip_entries(&args.allow_ips),
+                blocked_ips: parse_ip_entries(&args.block_ips),
                 blocked_paths: args.block_paths.clone(),
                 blocked_user_agents: args.block_user_agents.clone(),
             }),
@@ -115,22 +137,12 @@ impl DenylistHandler {
 
     /// Reconfigure the agent with new settings
     fn reconfigure(&self, config: DenylistConfigJson, version: Option<String>) {
-        // Parse blocked IPs
-        let blocked_ips: HashSet<IpAddr> = config
-            .block_ips
-            .iter()
-            .filter_map(|ip| match IpAddr::from_str(ip) {
-                Ok(addr) => Some(addr),
-                Err(e) => {
-                    warn!("Invalid IP address '{}': {}", ip, e);
-                    None
-                }
-            })
-            .collect();
-
         if let Ok(mut state) = self.state.write() {
+            if !config.allow_ips.is_empty() {
+                state.allowed_ips = parse_ip_entries(&config.allow_ips);
+            }
             if !config.block_ips.is_empty() {
-                state.blocked_ips = blocked_ips;
+                state.blocked_ips = parse_ip_entries(&config.block_ips);
             }
             if !config.block_paths.is_empty() {
                 state.blocked_paths = config.block_paths;
@@ -146,11 +158,19 @@ impl DenylistHandler {
         }
     }
 
-    /// Check if an IP is blocked
+    /// Check if an IP is blocked.
+    ///
+    /// Allow entries take precedence over block entries: an address that
+    /// matches any `allow_ips` network is never blocked. This makes a
+    /// default-deny (allowlist) setup possible by blocking `0.0.0.0/0`
+    /// and `::/0` while allowing specific addresses or ranges.
     fn is_ip_blocked(&self, ip: &str) -> bool {
         if let Ok(addr) = IpAddr::from_str(ip) {
             if let Ok(state) = self.state.read() {
-                return state.blocked_ips.contains(&addr);
+                if state.allowed_ips.iter().any(|net| net.contains(&addr)) {
+                    return false;
+                }
+                return state.blocked_ips.iter().any(|net| net.contains(&addr));
             }
         }
         false
@@ -330,6 +350,9 @@ async fn main() -> Result<()> {
 
     // Log configuration
     info!("Starting denylist agent v{}", env!("CARGO_PKG_VERSION"));
+    if !args.allow_ips.is_empty() {
+        info!("Allowing IPs: {:?}", args.allow_ips);
+    }
     if !args.block_ips.is_empty() {
         info!("Blocking IPs: {:?}", args.block_ips);
     }
@@ -375,6 +398,19 @@ mod tests {
             block_ips,
             block_paths,
             block_user_agents,
+            allow_ips: vec![],
+            verbose: false,
+        }
+    }
+
+    fn create_test_args_with_allow(allow_ips: Vec<String>, block_ips: Vec<String>) -> Args {
+        Args {
+            socket: "/tmp/test.sock".to_string(),
+            grpc_address: None,
+            block_ips,
+            block_paths: vec![],
+            block_user_agents: vec![],
+            allow_ips,
             verbose: false,
         }
     }
@@ -393,6 +429,79 @@ mod tests {
         assert!(handler.is_ip_blocked("10.0.0.1"));
         assert!(!handler.is_ip_blocked("192.168.1.101"));
         assert!(!handler.is_ip_blocked("invalid-ip"));
+    }
+
+    #[test]
+    fn test_cidr_blocking() {
+        let args = create_test_args(
+            vec!["192.168.0.0/24".to_string(), "2001:db8::/32".to_string()],
+            vec![],
+            vec![],
+        );
+
+        let handler = DenylistHandler::new(&args);
+
+        assert!(handler.is_ip_blocked("192.168.0.1"));
+        assert!(handler.is_ip_blocked("192.168.0.254"));
+        assert!(!handler.is_ip_blocked("192.168.1.1"));
+        assert!(handler.is_ip_blocked("2001:db8::1"));
+        assert!(!handler.is_ip_blocked("2001:db9::1"));
+    }
+
+    #[test]
+    fn test_allow_takes_precedence_over_block() {
+        let args = create_test_args_with_allow(
+            vec!["10.0.0.5".to_string(), "192.168.1.0/28".to_string()],
+            vec!["10.0.0.0/8".to_string(), "192.168.1.0/24".to_string()],
+        );
+
+        let handler = DenylistHandler::new(&args);
+
+        // Allowed entries win even though they fall inside blocked networks
+        assert!(!handler.is_ip_blocked("10.0.0.5"));
+        assert!(!handler.is_ip_blocked("192.168.1.14"));
+        // Everything else in the blocked networks stays blocked
+        assert!(handler.is_ip_blocked("10.0.0.6"));
+        assert!(handler.is_ip_blocked("192.168.1.16"));
+    }
+
+    #[test]
+    fn test_default_deny_with_allowlist() {
+        // Deny everything, allow only a small set: the "deny all except a few"
+        // setup from issue #1.
+        let args = create_test_args_with_allow(
+            vec!["203.0.113.10".to_string(), "198.51.100.0/24".to_string()],
+            vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+        );
+
+        let handler = DenylistHandler::new(&args);
+
+        // Allowlisted addresses pass
+        assert!(!handler.is_ip_blocked("203.0.113.10"));
+        assert!(!handler.is_ip_blocked("198.51.100.42"));
+        // Everything else is denied, IPv4 and IPv6 alike
+        assert!(handler.is_ip_blocked("8.8.8.8"));
+        assert!(handler.is_ip_blocked("203.0.113.11"));
+        assert!(handler.is_ip_blocked("2001:db8::1"));
+    }
+
+    #[test]
+    fn test_invalid_ip_entries_are_skipped() {
+        let args = create_test_args(
+            vec![
+                "not-an-ip".to_string(),
+                "10.0.0.0/99".to_string(),
+                "10.0.0.1".to_string(),
+            ],
+            vec![],
+            vec![],
+        );
+
+        let handler = DenylistHandler::new(&args);
+
+        // The valid entry still applies; invalid ones are ignored
+        assert!(handler.is_ip_blocked("10.0.0.1"));
+        assert!(!handler.is_ip_blocked("10.0.0.2"));
     }
 
     #[test]
@@ -491,7 +600,8 @@ mod tests {
         let handler = DenylistHandler::new(&args);
 
         let config = serde_json::json!({
-            "block-ips": ["1.2.3.4"],
+            "block-ips": ["1.2.3.4", "172.16.0.0/12"],
+            "allow-ips": ["172.16.10.1"],
             "block-paths": ["/secret"],
             "block-user-agents": ["evil-bot"]
         });
@@ -502,6 +612,8 @@ mod tests {
         assert!(accepted);
 
         assert!(handler.is_ip_blocked("1.2.3.4"));
+        assert!(handler.is_ip_blocked("172.16.0.99"));
+        assert!(!handler.is_ip_blocked("172.16.10.1"));
         assert!(handler.is_path_blocked("/secret"));
         assert!(handler.is_user_agent_blocked("evil-bot"));
 

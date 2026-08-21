@@ -4,7 +4,8 @@ IP and pattern-based blocking agent for [Zentinel](https://github.com/zentinelpr
 
 ## Features
 
-- Block requests by client IP address
+- Block requests by client IP address or CIDR range
+- Allow-list IPs and CIDR ranges that take precedence over deny rules (enables default-deny setups)
 - Block requests by URL path prefix
 - Block requests by User-Agent pattern
 - Real-time blocking with no restart required
@@ -52,10 +53,18 @@ zentinel-denylist-agent --socket /var/run/zentinel/denylist.sock \
 | Option | Environment Variable | Description | Default |
 |--------|---------------------|-------------|---------|
 | `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-denylist.sock` |
-| `--block-ips` | - | Comma-separated IPs to block | - |
+| `--block-ips` | - | Comma-separated IPs or CIDR ranges to block | - |
+| `--allow-ips` | - | Comma-separated IPs or CIDR ranges to allow (take precedence over `--block-ips`) | - |
 | `--block-paths` | - | Comma-separated path prefixes to block | - |
 | `--block-user-agents` | - | Comma-separated User-Agent patterns to block | - |
 | `--verbose` | `RUST_LOG` | Enable verbose logging | `false` |
+
+### IP Matching Semantics
+
+- Entries may be plain addresses (`192.168.1.100`, `2001:db8::1`) or CIDR ranges (`192.168.0.0/24`, `2001:db8::/32`).
+- Allow entries are checked first: an IP matching any `--allow-ips` entry is never blocked by an IP rule, even if it also matches a `--block-ips` entry.
+- IPv4 and IPv6 are matched independently — `0.0.0.0/0` covers all of IPv4 only; add `::/0` to also cover IPv6.
+- Path and User-Agent deny rules are evaluated separately and are not bypassed by `--allow-ips`.
 
 ## Configuration
 
@@ -98,6 +107,25 @@ When a request is blocked, the agent returns:
 ```bash
 zentinel-denylist-agent \
   --block-ips "1.2.3.4,5.6.7.8,192.168.0.0/24"
+```
+
+### Deny everything except an allowlist
+
+Because allow entries take precedence over deny entries, a default-deny setup is a matter of blocking both address families entirely and allowing only the IPs or ranges that should get through:
+
+```bash
+zentinel-denylist-agent \
+  --block-ips "0.0.0.0/0,::/0" \
+  --allow-ips "203.0.113.10,198.51.100.0/24"
+```
+
+The same works through dynamic configuration pushed by the proxy (`on_configure`), using the keys `block-ips` and `allow-ips`:
+
+```json
+{
+  "block-ips": ["0.0.0.0/0", "::/0"],
+  "allow-ips": ["203.0.113.10", "198.51.100.0/24"]
+}
 ```
 
 ### Block admin paths

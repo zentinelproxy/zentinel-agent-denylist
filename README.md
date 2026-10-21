@@ -1,45 +1,109 @@
-# zentinel-agent-denylist
+<p align="center">
+  <a href="https://zentinelproxy.io">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
+      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+    </picture>
+  </a>
+</p>
 
-IP and pattern-based blocking agent for [Zentinel](https://github.com/zentinelproxy/zentinel) reverse proxy.
+<h3 align="center">Denylist agent</h3>
 
-## Features
+<p align="center">Blocks requests by client IP or CIDR range, path prefix or User-Agent, on the request headers.</p>
 
-- Block requests by client IP address or CIDR range
-- Allow-list IPs and CIDR ranges that take precedence over deny rules (enables default-deny setups)
-- Block requests by URL path prefix
-- Block requests by User-Agent pattern
-- Real-time blocking with no restart required
-- Configurable via CLI or config file
+<p align="center">
+  <a href="https://github.com/zentinelproxy/zentinel-agent-denylist/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/zentinelproxy/zentinel-agent-denylist/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-9b4d8a?style=flat&amp;labelColor=1f161e">
+  <img alt="Rust 1.94.1+" src="https://img.shields.io/badge/rust-1.94.1%2B-f68d31?style=flat&amp;labelColor=1f161e&amp;logo=rust&amp;logoColor=white">
+  <img alt="Agent protocol v2" src="https://img.shields.io/badge/agent%20protocol-v2-f68d31?style=flat&amp;labelColor=1f161e">
+</p>
 
-## Installation
+<p align="center">
+  <a href="https://registry.zentinelproxy.io/denylist/">Registry</a> &middot;
+  <a href="https://docs.zentinelproxy.io">Docs</a> &middot;
+  <a href="https://github.com/zentinelproxy">All repositories</a>
+</p>
 
-### Using Bundle (Recommended)
+A small, static denylist for operators who need to shut out known-bad clients,
+paths or tools without writing a WAF rule. The agent receives each request's
+headers and answers `403 Forbidden` when the client IP, the path or the
+User-Agent matches a rule, and allows everything else. An allowlist of IPs and
+ranges takes precedence over IP deny rules, so a default-deny setup is one flag
+away. If the agent is unreachable, the filter's `failure-mode` decides: `closed`
+(as below) rejects the request, `open` forwards it unchecked.
+
+## Quick start
 
 ```bash
-# Install just this agent
 zentinel bundle install denylist
 
-# Or install all bundled agents
-zentinel bundle install
+zentinel-denylist-agent --socket /tmp/zentinel-denylist.sock \
+  --block-ips "192.0.2.10,198.51.100.0/24" \
+  --block-paths "/admin,/.env,/.git" \
+  --block-user-agents "sqlmap,nikto"
 ```
 
-The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/) for details.
+```kdl
+system {
+    worker-threads 0
+}
 
-### Using Cargo
+listeners {
+    listener "http" {
+        address "0.0.0.0:8080"
+        protocol "http"
+    }
+}
 
-`zentinel-agent-denylist` is not published on crates.io, so `cargo install zentinel-agent-denylist` does not
-work. Install straight from the repository instead:
+upstreams {
+    upstream "backend" {
+        target "127.0.0.1:3000"
+    }
+}
+
+agents {
+    agent "denylist" type="custom" {
+        unix-socket "/tmp/zentinel-denylist.sock"
+        events "request_headers"
+        timeout-ms 100
+    }
+}
+
+filters {
+    filter "denylist" {
+        type "agent"
+        agent "denylist"
+        failure-mode "closed"
+    }
+}
+
+routes {
+    route "default" {
+        matches { path-prefix "/" }
+        upstream "backend"
+        filters "denylist"
+    }
+}
+```
 
 ```bash
-cargo install --git https://github.com/zentinelproxy/zentinel-agent-denylist
+zentinel test -c zentinel.kdl
+zentinel -c zentinel.kdl
 ```
 
-This builds and installs the `zentinel-denylist-agent` binary.
+## Install
 
-### Prebuilt Binaries
+### Bundle (recommended)
 
-Each [release](https://github.com/zentinelproxy/zentinel-agent-denylist/releases) ships binaries
-for `linux-x86_64`, `linux-aarch64`, and `darwin-aarch64`:
+```bash
+zentinel bundle install denylist
+```
+
+Downloads the release binary pinned in Zentinel's bundle lock and installs it as `zentinel-denylist-agent`. See [Bundle installation](https://docs.zentinelproxy.io/deployment/bundle/).
+
+### Release binaries
+
+Tarballs for `linux-x86_64`, `linux-aarch64` and `darwin-aarch64` are attached to each [release](https://github.com/zentinelproxy/zentinel-agent-denylist/releases):
 
 ```bash
 VERSION=0.3.0
@@ -50,87 +114,38 @@ tar -xzf zentinel-denylist-agent.tar.gz
 sudo install -m 0755 zentinel-denylist-agent /usr/local/bin/
 ```
 
-### From Source
+### From source
 
 ```bash
-git clone https://github.com/zentinelproxy/zentinel-agent-denylist
-cd zentinel-agent-denylist
-cargo build --release
+cargo install --git https://github.com/zentinelproxy/zentinel-agent-denylist
 ```
 
-## Usage
-
-```bash
-zentinel-denylist-agent --socket /var/run/zentinel/denylist.sock \
-  --block-ips "192.168.1.100,10.0.0.1" \
-  --block-paths "/admin,/wp-admin" \
-  --block-user-agents "bot,scanner"
-```
-
-### Command Line Options
-
-| Option | Environment Variable | Description | Default |
-|--------|---------------------|-------------|---------|
-| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-denylist.sock` |
-| `--block-ips` | - | Comma-separated IPs or CIDR ranges to block | - |
-| `--allow-ips` | - | Comma-separated IPs or CIDR ranges to allow (take precedence over `--block-ips`) | - |
-| `--block-paths` | - | Comma-separated path prefixes to block | - |
-| `--block-user-agents` | - | Comma-separated User-Agent patterns to block | - |
-| `--verbose` | `RUST_LOG` | Enable verbose logging | `false` |
-
-### IP Matching Semantics
-
-- Entries may be plain addresses (`192.168.1.100`, `2001:db8::1`) or CIDR ranges (`192.168.0.0/24`, `2001:db8::/32`).
-- Allow entries are checked first: an IP matching any `--allow-ips` entry is never blocked by an IP rule, even if it also matches a `--block-ips` entry.
-- IPv4 and IPv6 are matched independently — `0.0.0.0/0` covers all of IPv4 only; add `::/0` to also cover IPv6.
-- Path and User-Agent deny rules are evaluated separately and are not bypassed by `--allow-ips`.
+Installs `zentinel-denylist-agent`. Needs Rust 1.94.1 or later and `protoc` (the agent protocol crate compiles its gRPC definitions).
 
 ## Configuration
 
-### Zentinel Proxy Configuration
+The agent is configured with command-line flags; it reads no config file.
+List flags take comma-separated values.
 
-Add to your Zentinel `config.kdl`:
+| Option | Default | Meaning |
+|---|---|---|
+| `-s`, `--socket` | `/tmp/zentinel-denylist.sock` | Unix socket to listen on. Ignored when `--grpc-address` is set. |
+| `--grpc-address` | none | Listen for gRPC on this address (for example `0.0.0.0:50051`) instead of the Unix socket. |
+| `--block-ips` | none | IP addresses or CIDR ranges to block. Invalid entries are skipped with a warning. |
+| `--allow-ips` | none | IP addresses or CIDR ranges that are never blocked by an IP rule, even if they match `--block-ips`. |
+| `--block-paths` | none | Path prefixes to block. Case-sensitive prefix match on the request URI. |
+| `--block-user-agents` | none | Substrings to block in the `User-Agent` header. Case-insensitive. |
+| `-v`, `--verbose` | off | Log at `debug`. Without it the log level comes from `RUST_LOG` (default `info`). |
 
-```kdl
-agents {
-    agent "denylist" {
-        type "custom"
-        transport "unix_socket" {
-            path "/var/run/zentinel/denylist.sock"
-        }
-        events "request_headers"
-        timeout-ms 10
-        failure-mode "open"
-    }
-}
+The agent also accepts the same lists over the protocol (`on_configure`, keys
+`block-ips`, `allow-ips`, `block-paths`, `block-user-agents`), but Zentinel
+0.6.50 does not forward an `agent { config { ... } }` block, so set them here.
 
-routes {
-    route "all" {
-        matches { path-prefix "/" }
-        upstream "backend"
-        agents "denylist"
-    }
-}
-```
+Full reference: <https://registry.zentinelproxy.io/denylist/>
 
-## Response
+### Default deny
 
-When a request is blocked, the agent returns:
-- **HTTP 403 Forbidden**
-- Body with the block reason
-
-## Example Scenarios
-
-### Block known bad IPs
-
-```bash
-zentinel-denylist-agent \
-  --block-ips "1.2.3.4,5.6.7.8,192.168.0.0/24"
-```
-
-### Deny everything except an allowlist
-
-Because allow entries take precedence over deny entries, a default-deny setup is a matter of blocking both address families entirely and allowing only the IPs or ranges that should get through:
+Block both address families and allow only what should get through:
 
 ```bash
 zentinel-denylist-agent \
@@ -138,39 +153,57 @@ zentinel-denylist-agent \
   --allow-ips "203.0.113.10,198.51.100.0/24"
 ```
 
-The same works through dynamic configuration pushed by the proxy (`on_configure`), using the keys `block-ips` and `allow-ips`:
+## How it works
 
-```json
-{
-  "block-ips": ["0.0.0.0/0", "::/0"],
-  "allow-ips": ["203.0.113.10", "198.51.100.0/24"]
-}
-```
+For each request the agent checks, in order, and stops at the first match:
 
-### Block admin paths
+1. **Client IP.** Plain addresses (`192.0.2.10`, `2001:db8::1`) and CIDR ranges
+   (`192.0.2.0/24`, `2001:db8::/32`) are accepted. An `--allow-ips` match wins
+   over any `--block-ips` match. IPv4 and IPv6 are separate: `0.0.0.0/0` covers
+   IPv4 only, add `::/0` for IPv6.
+2. **Path.** The request URI starts with a `--block-paths` entry. The URI
+   includes the query string; entries are compared as given, without
+   normalization.
+3. **User-Agent.** The first `User-Agent` value contains a
+   `--block-user-agents` entry, ignoring case.
 
-```bash
-zentinel-denylist-agent \
-  --block-paths "/admin,/wp-admin,/.env,/.git"
-```
-
-### Block malicious bots
-
-```bash
-zentinel-denylist-agent \
-  --block-user-agents "sqlmap,nikto,nessus,acunetix"
-```
+`--allow-ips` exempts an address from IP rules only; path and User-Agent rules
+still apply to it. A blocked request gets `403 Forbidden` with a plain-text
+body naming the rule (for example `IP 192.0.2.10 is blocked`), and the reason
+is attached as `deny_reason` routing metadata. Rules are fixed at startup;
+restart the agent to change them. The agent reports
+`denylist_requests_total` and `denylist_requests_blocked_total` through the
+protocol's metrics.
 
 ## Development
 
 ```bash
-# Run with debug logging
-RUST_LOG=debug cargo run -- --socket /tmp/test.sock --block-ips "127.0.0.1"
-
-# Run tests
-cargo test
+cargo build
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
 ```
+
+Needs Rust 1.94.1 or later (`rust-version` in `Cargo.toml`) and `protoc`.
+
+```bash
+cargo run -- --socket /tmp/zentinel-denylist.sock --block-ips 127.0.0.1 --verbose
+```
+
+## Related
+
+- [Registry page](https://registry.zentinelproxy.io/denylist/)
+- [Agent configuration](https://docs.zentinelproxy.io/configuration/agents/)
+- [Agent protocol v2](https://docs.zentinelproxy.io/agents/v2/)
+- [Zentinel](https://github.com/zentinelproxy/zentinel)
+- [IP reputation agent](https://github.com/zentinelproxy/zentinel-agent-ip-reputation), for blocklists fetched from threat feeds
 
 ## License
 
-Apache-2.0
+Apache-2.0, see [`LICENSE`](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Part of <a href="https://zentinelproxy.io">Zentinel</a>, the security-first reverse proxy. The shisa guards the gate.</sub>
+</p>

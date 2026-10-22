@@ -21,7 +21,7 @@ use zentinel_agent_protocol::{AgentResponse, Decision, EventType, RequestHeaders
 
 /// Denylist agent CLI arguments
 #[derive(Parser, Debug)]
-#[command(name = "denylist-agent")]
+#[command(name = "zentinel-denylist-agent", version)]
 #[command(about = "Denylist agent for blocking requests based on IP, path, and header rules")]
 struct Args {
     /// Unix socket path to listen on
@@ -583,6 +583,17 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    /// The release pipeline and `zentinel bundle install` expect exactly
+    /// `<binary> <version>`.
+    #[test]
+    fn version_is_binary_name_and_package_version() {
+        assert_eq!(
+            Args::command().render_version(),
+            format!("{} {}\n", env!("CARGO_BIN_NAME"), env!("CARGO_PKG_VERSION"))
+        );
+    }
 
     fn create_test_args(
         block_ips: Vec<String>,

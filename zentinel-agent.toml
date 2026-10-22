@@ -3,19 +3,19 @@
 
 [agent]
 name = "zentinel-agent-denylist"
-version = "0.1.0"
+version = "0.4.0"
 description = "IP and pattern-based blocking agent for Zentinel reverse proxy"
 authors = ["Zentinel Contributors"]
 license = "Apache-2.0"
 repository = "https://github.com/zentinelproxy/zentinel-agent-denylist"
 
 [protocol]
-version = "0.1"
+version = "2"
 events = ["request_headers"]
 
 [compatibility]
 zentinel-proxy = ">=0.1.0"
-zentinel-agent-protocol = "0.1"
+zentinel-agent-protocol = "0.6"
 
 [registry]
 homepage = "https://zentinelproxy.io/agents/denylist"

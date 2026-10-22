@@ -137,9 +137,39 @@ List flags take comma-separated values.
 | `--block-user-agents` | none | Substrings to block in the `User-Agent` header. Case-insensitive. |
 | `-v`, `--verbose` | off | Log at `debug`. Without it the log level comes from `RUST_LOG` (default `info`). |
 
-The agent also accepts the same lists over the protocol (`on_configure`, keys
-`block-ips`, `allow-ips`, `block-paths`, `block-user-agents`), but Zentinel
-0.6.50 does not forward an `agent { config { ... } }` block, so set them here.
+### Settings from the proxy (`config { }`)
+
+The same lists can be set in the agent block's `config { }`, with the keys
+`block-ips`, `allow-ips`, `block-paths` and `block-user-agents`. Zentinel
+(from the release after 0.6.50) sends that block on every connection: once
+per pooled connection at startup and again on every reconnect. The agent
+applies it by one rule:
+
+- **Idempotent.** The block's canonical JSON is hashed; a block identical to
+  the one already applied is a no-op.
+- **Merge, don't replace.** A list the block sets replaces the flag of the
+  same name; a list it leaves out keeps the flag's value.
+- **Strict.** An unknown or misspelled key, a value that is not a string or a
+  list of strings, an invalid IP or CIDR entry, or an empty path or
+  User-Agent entry rejects the whole block (the proxy then drops that
+  connection) and the agent keeps its current lists. On the command line an
+  invalid IP entry is still skipped with a warning; in the block it is an
+  error, so a list of typos can never replace a working list with an empty
+  one.
+- **Logs** carry the block's hash and the names of the lists that changed,
+  never the block itself.
+
+```kdl
+agent "denylist" type="custom" {
+    unix-socket "/tmp/zentinel-denylist.sock"
+    events "request_headers"
+    config {
+        block-ips "0.0.0.0/0" "::/0"
+        allow-ips "203.0.113.10"          // one entry: a single string is fine
+        block-paths "/admin" "/.env"
+    }
+}
+```
 
 Full reference: <https://registry.zentinelproxy.io/denylist/>
 
@@ -170,8 +200,8 @@ For each request the agent checks, in order, and stops at the first match:
 `--allow-ips` exempts an address from IP rules only; path and User-Agent rules
 still apply to it. A blocked request gets `403 Forbidden` with a plain-text
 body naming the rule (for example `IP 192.0.2.10 is blocked`), and the reason
-is attached as `deny_reason` routing metadata. Rules are fixed at startup;
-restart the agent to change them. The agent reports
+is attached as `deny_reason` routing metadata. Rules come from the flags and the
+proxy's `config { }` block; restart the agent to change the flags. The agent reports
 `denylist_requests_total` and `denylist_requests_blocked_total` through the
 protocol's metrics.
 

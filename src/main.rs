@@ -56,26 +56,184 @@ struct Args {
     verbose: bool,
 }
 
-/// JSON configuration for dynamic reconfiguration via on_configure()
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
+/// The proxy's `config { }` block (see `on_configure`).
+///
+/// Every field is optional: an absent field keeps the value from the
+/// command line. Unknown keys are rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct DenylistConfigJson {
     /// IP addresses or CIDR ranges to block
-    #[serde(default)]
-    pub block_ips: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub block_ips: Option<Vec<String>>,
     /// IP addresses or CIDR ranges to allow (take precedence over block-ips)
-    #[serde(default)]
-    pub allow_ips: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub allow_ips: Option<Vec<String>>,
     /// Path prefixes to block
-    #[serde(default)]
-    pub block_paths: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub block_paths: Option<Vec<String>>,
     /// User-Agent patterns to block
-    #[serde(default)]
-    pub block_user_agents: Vec<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub block_user_agents: Option<Vec<String>>,
+}
+
+/// A list of strings that may also arrive as a single string: the proxy turns
+/// a KDL node with one argument (`block-ips "10.0.0.0/8"`) into a scalar.
+fn one_or_many<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => match serde_json::from_value::<OneOrMany>(value.clone()) {
+            Ok(OneOrMany::One(s)) => Ok(Some(vec![s])),
+            Ok(OneOrMany::Many(v)) => Ok(Some(v)),
+            Err(_) => Err(serde::de::Error::custom(format!(
+                "expected a string or a list of strings, got {value}"
+            ))),
+        },
+    }
+}
+
+/// The effective lists, as strings (what the command line and the config
+/// block are written in).
+#[derive(Debug, Clone, PartialEq, Default)]
+struct DenylistLists {
+    block_ips: Vec<String>,
+    allow_ips: Vec<String>,
+    block_paths: Vec<String>,
+    block_user_agents: Vec<String>,
+}
+
+impl DenylistLists {
+    fn from_args(args: &Args) -> Self {
+        Self {
+            block_ips: args.block_ips.clone(),
+            allow_ips: args.allow_ips.clone(),
+            block_paths: args.block_paths.clone(),
+            block_user_agents: args.block_user_agents.clone(),
+        }
+    }
+
+    /// `self` with the lists a config block sets replaced by its values.
+    fn overlay(&self, block: &DenylistConfigJson) -> Self {
+        Self {
+            block_ips: block
+                .block_ips
+                .clone()
+                .unwrap_or_else(|| self.block_ips.clone()),
+            allow_ips: block
+                .allow_ips
+                .clone()
+                .unwrap_or_else(|| self.allow_ips.clone()),
+            block_paths: block
+                .block_paths
+                .clone()
+                .unwrap_or_else(|| self.block_paths.clone()),
+            block_user_agents: block
+                .block_user_agents
+                .clone()
+                .unwrap_or_else(|| self.block_user_agents.clone()),
+        }
+    }
+
+    /// Names of the lists that differ from `other`.
+    fn changed_keys(&self, other: &Self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.block_ips != other.block_ips {
+            out.push("block-ips");
+        }
+        if self.allow_ips != other.allow_ips {
+            out.push("allow-ips");
+        }
+        if self.block_paths != other.block_paths {
+            out.push("block-paths");
+        }
+        if self.block_user_agents != other.block_user_agents {
+            out.push("block-user-agents");
+        }
+        out
+    }
+}
+
+/// Validate the lists a config block sets. Unlike the command line, which
+/// skips invalid IP entries with a warning, a block with any invalid entry is
+/// rejected: a list of typos would otherwise replace a working list with an
+/// empty one.
+fn validate_block(block: &DenylistConfigJson) -> Result<(), String> {
+    for (key, entries) in [
+        ("block-ips", &block.block_ips),
+        ("allow-ips", &block.allow_ips),
+    ] {
+        for entry in entries.iter().flatten() {
+            if parse_ip_entry(entry).is_none() {
+                return Err(format!("{key}: invalid IP address or CIDR {entry:?}"));
+            }
+        }
+    }
+    for (key, entries) in [
+        ("block-paths", &block.block_paths),
+        ("block-user-agents", &block.block_user_agents),
+    ] {
+        if entries.iter().flatten().any(|e| e.is_empty()) {
+            return Err(format!("{key}: empty entry (it would match every request)"));
+        }
+    }
+    Ok(())
+}
+
+/// A stable hash (FNV-1a, 64 bit) of the canonical JSON of `value` (object
+/// keys sorted), so identical blocks hash the same whatever their key order.
+fn canonical_hash(value: &serde_json::Value) -> String {
+    fn write(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, k) in keys.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String(k.clone()).to_string());
+                    out.push(':');
+                    write(&map[k], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut text = String::new();
+    write(value, &mut text);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Internal state for denylist configuration
 struct DenylistState {
+    /// The lists below, as configured
+    lists: DenylistLists,
     /// Networks that are always allowed (checked before deny rules)
     allowed_ips: Vec<IpNet>,
     /// Networks to block
@@ -84,6 +242,18 @@ struct DenylistState {
     blocked_paths: Vec<String>,
     /// Set of blocked User-Agent patterns
     blocked_user_agents: Vec<String>,
+}
+
+impl DenylistState {
+    fn from_lists(lists: DenylistLists) -> Self {
+        Self {
+            allowed_ips: parse_ip_entries(&lists.allow_ips),
+            blocked_ips: parse_ip_entries(&lists.block_ips),
+            blocked_paths: lists.block_paths.clone(),
+            blocked_user_agents: lists.block_user_agents.clone(),
+            lists,
+        }
+    }
 }
 
 /// Parse a list of IP address or CIDR strings into networks.
@@ -95,17 +265,21 @@ fn parse_ip_entries(entries: &[String]) -> Vec<IpNet> {
     entries
         .iter()
         .filter_map(|entry| {
-            let entry = entry.trim();
-            if let Ok(net) = IpNet::from_str(entry) {
-                Some(net)
-            } else if let Ok(addr) = IpAddr::from_str(entry) {
-                Some(IpNet::from(addr))
-            } else {
-                warn!("Invalid IP address or CIDR '{}', skipping", entry);
-                None
+            let net = parse_ip_entry(entry);
+            if net.is_none() {
+                warn!("Invalid IP address or CIDR '{}', skipping", entry.trim());
             }
+            net
         })
         .collect()
+}
+
+/// Parse one IP address or CIDR string.
+fn parse_ip_entry(entry: &str) -> Option<IpNet> {
+    let entry = entry.trim();
+    IpNet::from_str(entry)
+        .ok()
+        .or_else(|| IpAddr::from_str(entry).ok().map(IpNet::from))
 }
 
 /// Denylist agent handler (v2 protocol)
@@ -117,45 +291,63 @@ struct DenylistHandler {
     requests_blocked: AtomicU64,
     /// Configuration version
     config_version: RwLock<Option<String>>,
+    /// The lists from the command line; a config block overlays these.
+    base: DenylistLists,
+    /// Hash of the last config block applied.
+    applied_hash: RwLock<Option<String>>,
+    /// Serializes configure events (several pooled connections configure at once).
+    configure_lock: std::sync::Mutex<()>,
 }
 
 impl DenylistHandler {
     /// Create a new denylist handler
     fn new(args: &Args) -> Self {
+        let base = DenylistLists::from_args(args);
         Self {
-            state: RwLock::new(DenylistState {
-                allowed_ips: parse_ip_entries(&args.allow_ips),
-                blocked_ips: parse_ip_entries(&args.block_ips),
-                blocked_paths: args.block_paths.clone(),
-                blocked_user_agents: args.block_user_agents.clone(),
-            }),
+            state: RwLock::new(DenylistState::from_lists(base.clone())),
             requests_processed: AtomicU64::new(0),
             requests_blocked: AtomicU64::new(0),
             config_version: RwLock::new(None),
+            base,
+            applied_hash: RwLock::new(None),
+            configure_lock: std::sync::Mutex::new(()),
         }
     }
 
-    /// Reconfigure the agent with new settings
-    fn reconfigure(&self, config: DenylistConfigJson, version: Option<String>) {
-        if let Ok(mut state) = self.state.write() {
-            if !config.allow_ips.is_empty() {
-                state.allowed_ips = parse_ip_entries(&config.allow_ips);
-            }
-            if !config.block_ips.is_empty() {
-                state.blocked_ips = parse_ip_entries(&config.block_ips);
-            }
-            if !config.block_paths.is_empty() {
-                state.blocked_paths = config.block_paths;
-            }
-            if !config.block_user_agents.is_empty() {
-                state.blocked_user_agents = config.block_user_agents;
-            }
-            info!("Denylist agent reconfigured");
+    /// Apply the proxy's config block; returns the names of the lists that
+    /// changed.
+    ///
+    /// The proxy sends the block on every connection, so this is idempotent:
+    /// a block identical to the one applied is a no-op, the block overlays
+    /// the command-line lists (absent keys keep them), and unknown keys or
+    /// invalid entries reject the whole block.
+    fn apply_config(&self, block: &serde_json::Value) -> Result<Vec<&'static str>, String> {
+        let _guard = self.configure_lock.lock().map_err(|e| e.to_string())?;
+        let hash = canonical_hash(block);
+        if self
+            .applied_hash
+            .read()
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            == Some(hash.as_str())
+        {
+            debug!(config_hash = %hash, "Configuration unchanged, nothing to do");
+            return Ok(Vec::new());
         }
+        let parsed: DenylistConfigJson =
+            serde_json::from_value(block.clone()).map_err(|e| e.to_string())?;
+        validate_block(&parsed)?;
+        let lists = self.base.overlay(&parsed);
 
-        if let Ok(mut ver) = self.config_version.write() {
-            *ver = version;
+        let mut state = self.state.write().map_err(|e| e.to_string())?;
+        let changed = lists.changed_keys(&state.lists);
+        if !changed.is_empty() {
+            *state = DenylistState::from_lists(lists);
         }
+        drop(state);
+        *self.applied_hash.write().map_err(|e| e.to_string())? = Some(hash.clone());
+        info!(config_hash = %hash, changed = ?changed, "Applied configuration");
+        Ok(changed)
     }
 
     /// Check if an IP is blocked.
@@ -238,17 +430,22 @@ impl AgentHandlerV2 for DenylistHandler {
 
     /// Handle configuration update from proxy (v2 signature)
     async fn on_configure(&self, config: serde_json::Value, version: Option<String>) -> bool {
-        let parsed_config: DenylistConfigJson = match serde_json::from_value(config) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                warn!("Failed to parse denylist config: {}, using defaults", e);
-                return false;
+        match self.apply_config(&config) {
+            Ok(_) => {
+                if let Ok(mut ver) = self.config_version.write() {
+                    *ver = version;
+                }
+                true
             }
-        };
-
-        self.reconfigure(parsed_config, version);
-        info!("Denylist agent configured via on_configure");
-        true
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    config_hash = %canonical_hash(&config),
+                    "Rejected denylist configuration, keeping the current one"
+                );
+                false
+            }
+        }
     }
 
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
@@ -623,17 +820,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_on_configure_invalid() {
-        let args = create_test_args(vec![], vec![], vec![]);
+    async fn test_on_configure_unknown_key_rejected() {
+        let args = create_test_args(vec!["10.0.0.1".to_string()], vec![], vec![]);
         let handler = DenylistHandler::new(&args);
 
-        // Invalid config structure
-        let config = serde_json::json!({
-            "invalid_field": 123
-        });
+        for config in [
+            serde_json::json!({"invalid_field": 123}),
+            // A misspelled key must not leave the list silently unset.
+            serde_json::json!({"block-ip": ["1.2.3.4"]}),
+            serde_json::json!({"block_ips": ["1.2.3.4"]}),
+            serde_json::json!({"block-ips": true}),
+        ] {
+            assert!(
+                !handler.on_configure(config.clone(), None).await,
+                "accepted {config}"
+            );
+        }
+        assert!(handler.is_ip_blocked("10.0.0.1"));
+        assert!(!handler.is_ip_blocked("1.2.3.4"));
+    }
 
-        // Should still succeed with empty config (all fields are optional with defaults)
-        let accepted = handler.on_configure(config, None).await;
-        assert!(accepted);
+    #[tokio::test]
+    async fn test_on_configure_typo_list_rejected() {
+        let args = create_test_args(
+            vec!["10.0.0.0/8".to_string()],
+            vec![],
+            vec!["bot".to_string()],
+        );
+        let handler = DenylistHandler::new(&args);
+
+        // A list made only of typos used to replace the CLI list with an
+        // empty one, unblocking everything.
+        for config in [
+            serde_json::json!({"block-ips": ["10.0.0.0/88", "not-an-ip"]}),
+            serde_json::json!({"block-ips": ["1.2.3.4", "1.2.3.400"]}),
+            serde_json::json!({"allow-ips": "everyone"}),
+            serde_json::json!({"block-user-agents": [""]}),
+        ] {
+            assert!(
+                !handler.on_configure(config.clone(), None).await,
+                "accepted {config}"
+            );
+        }
+        assert!(handler.is_ip_blocked("10.1.2.3"));
+        assert!(handler.is_user_agent_blocked("BadBot"));
+    }
+
+    #[tokio::test]
+    async fn test_on_configure_partial_keeps_cli_lists() {
+        let args = create_test_args(
+            vec!["10.0.0.0/8".to_string()],
+            vec!["/admin".to_string()],
+            vec!["bot".to_string()],
+        );
+        let handler = DenylistHandler::new(&args);
+
+        // Only paths in the block; a one-item KDL list arrives as a string.
+        assert!(
+            handler
+                .on_configure(serde_json::json!({"block-paths": "/secret"}), None)
+                .await
+        );
+        assert!(handler.is_path_blocked("/secret"));
+        assert!(!handler.is_path_blocked("/admin"));
+        assert!(
+            handler.is_ip_blocked("10.1.2.3"),
+            "CLI block-ips were dropped"
+        );
+        assert!(handler.is_user_agent_blocked("BadBot"));
+    }
+
+    #[tokio::test]
+    async fn test_on_configure_identical_twice_is_a_no_op() {
+        let args = create_test_args(vec!["10.0.0.0/8".to_string()], vec![], vec![]);
+        let handler = DenylistHandler::new(&args);
+        let config = serde_json::json!({"block-ips": ["192.0.2.0/24"], "allow-ips": "192.0.2.7"});
+
+        assert_eq!(
+            handler.apply_config(&config).unwrap(),
+            vec!["block-ips", "allow-ips"]
+        );
+        // The proxy sends the same block on every connection; key order may differ.
+        let reordered =
+            serde_json::json!({"allow-ips": "192.0.2.7", "block-ips": ["192.0.2.0/24"]});
+        assert!(handler.apply_config(&config).unwrap().is_empty());
+        assert!(handler.apply_config(&reordered).unwrap().is_empty());
+        assert!(handler.on_configure(config, None).await);
+        assert!(handler.is_ip_blocked("192.0.2.1"));
+        assert!(!handler.is_ip_blocked("192.0.2.7"));
+        assert!(!handler.is_ip_blocked("10.1.2.3"));
     }
 }

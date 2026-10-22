@@ -101,12 +101,20 @@ zentinel bundle install denylist
 
 Downloads the release binary pinned in Zentinel's bundle lock and installs it as `zentinel-denylist-agent`. See [Bundle installation](https://docs.zentinelproxy.io/deployment/bundle/).
 
+> [!WARNING]
+> The published `0.3.0` release, which Zentinel 26.10_7's bundle lock pins,
+> was not built from its tag: it speaks the removed v1 framing on the Unix
+> socket, so the proxy never completes a handshake and, under
+> `failure-mode "closed"`, refuses every request (`503`). It also has no
+> `--version`. Use `0.4.0` or later, the first release built and smoke-tested
+> by the shared release pipeline (below).
+
 ### Release binaries
 
 Tarballs for `linux-x86_64`, `linux-aarch64` and `darwin-aarch64` are attached to each [release](https://github.com/zentinelproxy/zentinel-agent-denylist/releases):
 
 ```bash
-VERSION=0.3.0
+VERSION=0.4.0
 PLATFORM=linux-x86_64   # or linux-aarch64, darwin-aarch64
 curl -fsSL -o zentinel-denylist-agent.tar.gz \
   "https://github.com/zentinelproxy/zentinel-agent-denylist/releases/download/v${VERSION}/zentinel-denylist-agent-${VERSION}-${PLATFORM}.tar.gz"
@@ -136,6 +144,7 @@ List flags take comma-separated values.
 | `--block-paths` | none | Path prefixes to block. Case-sensitive prefix match on the request URI. |
 | `--block-user-agents` | none | Substrings to block in the `User-Agent` header. Case-insensitive. |
 | `-v`, `--verbose` | off | Log at `debug`. Without it the log level comes from `RUST_LOG` (default `info`). |
+| `-V`, `--version` | | Print `zentinel-denylist-agent <version>` and exit. |
 
 ### Settings from the proxy (`config { }`)
 
@@ -218,6 +227,36 @@ Needs Rust 1.94.1 or later (`rust-version` in `Cargo.toml`) and `protoc`.
 
 ```bash
 cargo run -- --socket /tmp/zentinel-denylist.sock --block-ips 127.0.0.1 --verbose
+```
+
+## Releases and smoke test
+
+Releases go through the shared agent pipeline
+([`zentinelproxy/.github`](https://github.com/zentinelproxy/.github/tree/main/agent-smoke)):
+pushing a tag `vX.Y.Z` that matches `Cargo.toml` builds `zentinel-denylist-agent` with
+`--locked` for `linux-x86_64`, `linux-aarch64` and `darwin-aarch64`, checks
+that `zentinel-denylist-agent --version` prints `zentinel-denylist-agent X.Y.Z`, runs
+[`scripts/smoke-test.sh`](scripts/smoke-test.sh) behind the latest Zentinel
+release on every platform, and only then publishes the tarballs
+`zentinel bundle install` downloads. CI runs the same pipeline on
+`linux-x86_64` for every push and pull request.
+
+The smoke test runs the release binary behind a real Zentinel with the agent,
+filter and route all `failure-mode "closed"`, over the Unix socket (the
+transport `zentinel bundle install` uses) and gRPC. It checks
+that an ordinary request is forwarded, that `/admin`, `/.env` and a `sqlmap`
+User-Agent get `403` and never reach the upstream, that a blocked client IP is
+refused and an allowlisted one is not under default deny, and that the
+request is refused once the agent is stopped (so the agent really is on the
+request path).
+
+Run it locally:
+
+```bash
+gh release download 26.10_7 --repo zentinelproxy/zentinel --pattern 'zentinel-26.10_7-darwin-arm64.tar.gz*'
+shasum -a 256 -c zentinel-26.10_7-darwin-arm64.tar.gz.sha256 && tar xzf zentinel-26.10_7-darwin-arm64.tar.gz
+cargo build --release --locked
+AGENT_SMOKE=../.github/agent-smoke/smoke.py scripts/smoke-test.sh target/release/zentinel-denylist-agent ./zentinel
 ```
 
 ## Related

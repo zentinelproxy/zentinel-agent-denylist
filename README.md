@@ -107,7 +107,8 @@ Downloads the release binary pinned in Zentinel's bundle lock and installs it as
 > socket, so the proxy never completes a handshake and, under
 > `failure-mode "closed"`, refuses every request (`503`). It also has no
 > `--version`. Use `0.4.0` or later, the first release built and smoke-tested
-> by the shared release pipeline (below).
+> by the shared release pipeline (below); Zentinel 26.10_8's bundle lock pins
+> `0.4.0`.
 
 ### Release binaries
 
@@ -150,9 +151,10 @@ List flags take comma-separated values.
 
 The same lists can be set in the agent block's `config { }`, with the keys
 `block-ips`, `allow-ips`, `block-paths` and `block-user-agents`. Zentinel
-(from the release after 0.6.50) sends that block on every connection: once
-per pooled connection at startup and again on every reconnect. The agent
-applies it by one rule:
+26.10_8 and later send that block on every connection: once per pooled
+connection at startup and again on every reconnect (releases up to 0.6.50
+never delivered it). The agent must answer each one; it applies the block by
+one rule:
 
 - **Idempotent.** The block's canonical JSON is hashed; a block identical to
   the one already applied is a no-op.
@@ -160,11 +162,12 @@ applies it by one rule:
   same name; a list it leaves out keeps the flag's value.
 - **Strict.** An unknown or misspelled key, a value that is not a string or a
   list of strings, an invalid IP or CIDR entry, or an empty path or
-  User-Agent entry rejects the whole block (the proxy then drops that
-  connection) and the agent keeps its current lists. On the command line an
-  invalid IP entry is still skipped with a warning; in the block it is an
-  error, so a list of typos can never replace a working list with an empty
-  one.
+  User-Agent entry rejects the whole block and the agent keeps its current
+  lists; the proxy then does not use the agent (the connection fails with an
+  ERROR log and is retried, and its filters' `failure-mode` applies
+  meanwhile). On the command line an invalid IP entry is still skipped with a
+  warning; in the block it is an error, so a list of typos can never replace
+  a working list with an empty one.
 - **Logs** carry the block's hash and the names of the lists that changed,
   never the block itself.
 
@@ -253,8 +256,8 @@ request path).
 Run it locally:
 
 ```bash
-gh release download 26.10_7 --repo zentinelproxy/zentinel --pattern 'zentinel-26.10_7-darwin-arm64.tar.gz*'
-shasum -a 256 -c zentinel-26.10_7-darwin-arm64.tar.gz.sha256 && tar xzf zentinel-26.10_7-darwin-arm64.tar.gz
+gh release download 26.10_8 --repo zentinelproxy/zentinel --pattern 'zentinel-26.10_8-darwin-arm64.tar.gz*'
+shasum -a 256 -c zentinel-26.10_8-darwin-arm64.tar.gz.sha256 && tar xzf zentinel-26.10_8-darwin-arm64.tar.gz
 cargo build --release --locked
 AGENT_SMOKE=../.github/agent-smoke/smoke.py scripts/smoke-test.sh target/release/zentinel-denylist-agent ./zentinel
 ```
